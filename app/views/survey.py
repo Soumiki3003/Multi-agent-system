@@ -3,11 +3,20 @@ from flask_login import current_user, login_required
 from dependency_injector.wiring import inject, Provide
 from werkzeug.utils import secure_filename
 
+from app.challenges import UNLOCK_SEQUENCE
 from app.containers import Application
 from app.services import UserService
 from app.surveys import SURVEY_LIST, SURVEYS, submit_survey
 
 app = Blueprint("survey", __name__)
+
+
+def _challenge_stage_for_survey(survey_id: str) -> int | None:
+    """Map a survey id to the single challenge stage its hints should be scoped to."""
+    try:
+        return UNLOCK_SEQUENCE.index(survey_id)
+    except ValueError:
+        return None
 
 
 @app.route("/survey/list")
@@ -32,7 +41,9 @@ def show_form(
     hints = []
     if course_id:
         try:
-            hints = user_service.get_all_course_hints_for_student(current_user.id, course_id)
+            hints = user_service.get_all_course_hints_for_student(
+                current_user.id, course_id, challenge_stage=_challenge_stage_for_survey(survey_id)
+            )
         except Exception:
             hints = []
 
@@ -54,7 +65,9 @@ def show_form_embed(
     hints = []
     if course_id:
         try:
-            hints = user_service.get_all_course_hints_for_student(current_user.id, course_id)
+            hints = user_service.get_all_course_hints_for_student(
+                current_user.id, course_id, challenge_stage=_challenge_stage_for_survey(survey_id)
+            )
         except Exception:
             hints = []
 

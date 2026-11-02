@@ -108,6 +108,30 @@ function hideDrilldown() {
     document.getElementById('drilldown-panel').classList.add('hidden');
 }
 
+/* Copy chat transcript — delegated on the static page so it keeps working
+   no matter how deeply nested the HTMX-swapped content it lives in is. */
+document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.copy-chat-btn');
+    if (!btn) return;
+    var container = document.getElementById('chat-transcript');
+    if (!container) return;
+    var lines = [];
+    container.querySelectorAll('.chat-msg').forEach(function (el) {
+        var speaker = el.dataset.speaker;
+        var contentEl = el.querySelector('.chat-msg-content');
+        lines.push(speaker + ': ' + (contentEl ? contentEl.innerText : ''));
+    });
+    var text = lines.join('\n\n');
+    var original = btn.textContent;
+    navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = original; }, 1500);
+    }).catch(function () {
+        btn.textContent = 'Copy failed';
+        setTimeout(function () { btn.textContent = original; }, 1500);
+    });
+});
+
 function showDrilldown(title, url) {
     const panel = document.getElementById('drilldown-panel');
     const titleEl = document.getElementById('drilldown-title');

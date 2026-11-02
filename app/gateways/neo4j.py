@@ -7,6 +7,7 @@ from typing import Any, Literal, Self, Sequence
 from neo4j import Driver, GraphDatabase
 from neo4j_graphrag.embeddings.base import Embedder as EmbedderInterface
 from neo4j_graphrag.generation import GraphRAG
+from neo4j_graphrag.generation.prompts import RagTemplate
 from neo4j_graphrag.indexes import create_fulltext_index, create_vector_index
 from neo4j_graphrag.llm.base import LLMInterface
 from neo4j_graphrag.llm.types import LLMResponse, ToolCall, ToolCallResponse
@@ -33,6 +34,19 @@ from pydantic_ai import (
 )
 from pydantic_ai import (
     Tool as PydanticAiTool,
+)
+
+# GraphRAG's default system instructions ("Answer the user question using the
+# provided context.") give the LLM no reason to keep this short — this answer
+# is only ever an internal draft consumed by SupervisorAgentService's rewrite
+# step, never shown to the student, so there's no reason to pay for a long,
+# formatted one.
+_RAG_SYSTEM_INSTRUCTIONS = (
+    "Answer the user's question using ONLY the provided context — do not invent "
+    "facts or code. This is an internal draft that will be rewritten before a "
+    "student ever sees it, so prioritize brevity over completeness: a few plain "
+    "sentences, plus one short code snippet only if truly necessary. No markdown "
+    "headers, no emoji, no multiple sections."
 )
 
 
@@ -150,7 +164,11 @@ def neo4j_graphrag(params: Neo4jGraphRAGParams):
         result_formatter=_result_formatter,
     )
     logger.info("Neo4j GraphRAG initialized successfully")
-    return GraphRAG(retriever=retriever, llm=params.llm)
+    return GraphRAG(
+        retriever=retriever,
+        llm=params.llm,
+        prompt_template=RagTemplate(system_instructions=_RAG_SYSTEM_INSTRUCTIONS),
+    )
 
 
 class Neo4jAgent(LLMInterface):
@@ -175,7 +193,7 @@ class Neo4jAgent(LLMInterface):
         )
         model_kwargs = agent.model_settings
 
-        return cls(model_name=model_name, model_kwargs=model_kwargs)
+        return cls(model_name=model_name, model_params=model_kwargs)
 
     async def __run_agent(
         self,

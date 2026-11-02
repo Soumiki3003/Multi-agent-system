@@ -151,12 +151,22 @@ def _build_pdf(survey: dict, form_data: dict, student_name: str, student_email: 
     llm_helpful = form_data.get("llm_output_helpful", "").strip()
     llm_hallucination = form_data.get("llm_hallucination", "").strip()
     llm_evidence = form_data.get("llm_hallucination_evidence", "").strip()
+    agent_helpful_unhelpful = form_data.get("agent_helpful_unhelpful", "").strip()
+    agent_teaches_concepts_rating = form_data.get("agent_teaches_concepts_rating", "").strip()
+    agent_effectiveness_vs_llms_rating = form_data.get("agent_effectiveness_vs_llms_rating", "").strip()
 
-    if llm_helpful or llm_hallucination or llm_evidence:
+    if llm_helpful or llm_hallucination or llm_evidence or agent_helpful_unhelpful:
         story.append(Paragraph("AI Assistant Feedback", h2_style))
-        story.append(Paragraph("Was the output helpful?", q_style))
+        if agent_helpful_unhelpful:
+            story.append(Paragraph("How was the agent helpful/unhelpful in solving the challenges?", q_style))
+            story.append(Paragraph(f"→ {agent_helpful_unhelpful}", ans_style))
+            story.append(Paragraph("This tutoring agent taught me underlying concepts and guided me toward the right answer, rather than simply giving away hints.", q_style))
+            story.append(Paragraph(f"→ {agent_teaches_concepts_rating or '(not answered)'}", ans_style))
+            story.append(Paragraph("This tutoring agent helped me solve CTF challenges more effectively than commercial LLMs (e.g., GPT, Claude).", q_style))
+            story.append(Paragraph(f"→ {agent_effectiveness_vs_llms_rating or '(not answered)'}", ans_style))
+        story.append(Paragraph("Overall, the AI assistant's output was helpful. (1 = Strongly Disagree, 5 = Strongly Agree)", q_style))
         story.append(Paragraph(f"→ {llm_helpful or '(not answered)'}", ans_style))
-        story.append(Paragraph("Incorrect / misleading output?", q_style))
+        story.append(Paragraph("The AI assistant provided correct and truthful information. (1 = Strongly Disagree, 5 = Strongly Agree)", q_style))
         story.append(Paragraph(f"→ {llm_hallucination or '(not answered)'}", ans_style))
         if llm_evidence:
             story.append(Paragraph("Chat excerpt evidence:", q_style))

@@ -1,7 +1,7 @@
 <!-- User message -->
 <div class="chat chat-end">
     <div class="chat-header">{{ user_name }}</div>
-    <div class="chat-bubble chat-bubble-primary">{{ user_message }}</div>
+    <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">{{ user_message }}</div>
 </div>
 
 <!-- Assistant message -->
@@ -9,4 +9,13 @@
     <div class="chat-header">Assistant</div>
     <div class="chat-bubble md-bubble">{{ assistant_message }}</div>
 </div>
+
+{% if hint_text %}
+<!-- Hint (also viewable later via the hint icon) -->
+<div class="chat chat-start">
+    <div class="chat-bubble chat-bubble-warning">
+        <span class="font-semibold">💡 Hint:</span> {{ hint_text }}
+    </div>
+</div>
+{% endif %}
 

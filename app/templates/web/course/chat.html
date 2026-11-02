@@ -17,11 +17,58 @@
         height: calc(100vh - {% if breadcrumb %}20rem{% else %}16rem{% endif %});
         overflow-y: auto;
     }
+
+    #chat-input {
+        min-height: 3rem;
+        max-height: 10rem;
+        overflow-y: auto;
+    }
 </style>
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         var el = document.getElementById('chat-messages');
         if (el) el.scrollTop = el.scrollHeight;
+
+        var input = document.getElementById('chat-input');
+        var form = document.getElementById('chat-form');
+        if (!input || !form) return;
+
+        function autoGrow() {
+            input.style.height = 'auto';
+            input.style.height = input.scrollHeight + 'px';
+        }
+
+        function insertNewline() {
+            var start = input.selectionStart;
+            var end = input.selectionEnd;
+            input.value = input.value.slice(0, start) + '\n' + input.value.slice(end);
+            input.selectionStart = input.selectionEnd = start + 1;
+            autoGrow();
+        }
+
+        input.addEventListener('input', autoGrow);
+
+        input.addEventListener('keydown', function (e) {
+            if (e.key !== 'Enter' || e.isComposing) return;
+
+            // Shift+Enter keeps the browser default (new line); Cmd/Ctrl+Enter adds one too.
+            if (e.shiftKey) return;
+            if (e.metaKey || e.ctrlKey || e.altKey) {
+                e.preventDefault();
+                insertNewline();
+                return;
+            }
+
+            // Plain Enter sends.
+            e.preventDefault();
+            if (input.value.trim() === '') return;
+            form.requestSubmit();
+        });
+
+        form.addEventListener('htmx:afterRequest', function () {
+            input.style.height = 'auto';
+            input.focus();
+        });
     });
 </script>
 {% endblock %}
@@ -136,7 +183,7 @@
                         {% if msg.role == 'user' %}
                         <div class="chat chat-end">
                             <div class="chat-header">{{ current_user.name }}</div>
-                            <div class="chat-bubble chat-bubble-primary">{{ msg.content }}</div>
+                            <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap">{{ msg.content }}</div>
                         </div>
                         {% else %}
                         <div class="chat chat-start">
@@ -161,16 +208,17 @@
                     hx-target="#chat-messages"
                     hx-swap="beforeend"
                     hx-on::after-request="this.reset(); document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;"
-                    class="flex gap-2"
+                    class="flex gap-2 items-end"
                 >
-                    <input
-                        type="text"
+                    <textarea
+                        id="chat-input"
                         name="content"
-                        placeholder="Type your message..."
-                        class="input input-bordered flex-1"
+                        rows="1"
+                        placeholder="Type your message...  (Shift+Enter for a new line)"
+                        class="textarea textarea-bordered flex-1 resize-none leading-relaxed"
                         required
                         autocomplete="off"
-                    />
+                    ></textarea>
                     <button type="submit" class="btn btn-primary">
                         <span class="htmx-indicator loading loading-spinner loading-xs"></span>
                         Send

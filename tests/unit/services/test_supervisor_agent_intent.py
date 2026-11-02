@@ -172,10 +172,12 @@ def _setup_trajectory_mocks(
 
     mock_user_service.add_trajectory_entry.side_effect = capture_add
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = "Answer"
-    mock_rag_result.retriever_result.items = []
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    item = MagicMock()
+    item.content = "{'name': 'TestNode'}"
+    item.metadata = {"score": 0.9}
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = [item]
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     mock_user_service.get_user_trajectory_by_query_exact_match.side_effect = (
         lambda *a, **kw: []

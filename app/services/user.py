@@ -149,6 +149,8 @@ class UserService:
         self,
         user_id: str,
         *,
+        course_id: str | None = None,
+        challenge_stage: int | None = None,
         limit: int | None = None,
         offset: int | None = None,
         timestamp_order: Literal["ASC", "DESC"] = "DESC",
@@ -157,6 +159,8 @@ class UserService:
         def tx_fn(
             tx: ManagedTransaction,
             user_id: str,
+            course_id: str | None,
+            challenge_stage: int | None,
             *,
             limit: int | None = None,
             offset: int | None = None,
@@ -172,6 +176,12 @@ class UserService:
             WHERE u.id = $user_id
             """
             params: dict[str, Any] = {}
+            if course_id is not None:
+                query += " AND t.course_id = $course_id"
+                params["course_id"] = course_id
+            if challenge_stage is not None:
+                query += " AND t.challenge_stage = $challenge_stage"
+                params["challenge_stage"] = challenge_stage
             if limit is not None:
                 query += " LIMIT $limit"
                 params["limit"] = limit
@@ -198,6 +208,8 @@ class UserService:
             return session.execute_read(
                 tx_fn,
                 user_id,
+                course_id,
+                challenge_stage,
                 limit=limit,
                 offset=offset,
                 timestamp_order=timestamp_order,
@@ -207,6 +219,9 @@ class UserService:
         self,
         user_id: str,
         query: str,
+        *,
+        course_id: str | None = None,
+        challenge_stage: int | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> list[models.UserTrajectory]:
@@ -215,6 +230,8 @@ class UserService:
             tx: ManagedTransaction,
             user_id: str,
             query: str,
+            course_id: str | None,
+            challenge_stage: int | None,
             limit: int | None = None,
             offset: int | None = None,
         ) -> list[models.UserTrajectory]:
@@ -225,6 +242,12 @@ class UserService:
             """
 
             parameters = {}
+            if course_id is not None:
+                statement += " AND t.course_id = $course_id"
+                parameters["course_id"] = course_id
+            if challenge_stage is not None:
+                statement += " AND t.challenge_stage = $challenge_stage"
+                parameters["challenge_stage"] = challenge_stage
             if limit is not None:
                 statement += " LIMIT $limit"
                 parameters["limit"] = limit
@@ -248,7 +271,7 @@ class UserService:
 
         with self.__session_factory() as session:
             return session.execute_read(
-                tx_fn, user_id, query, limit=limit, offset=offset
+                tx_fn, user_id, query, course_id, challenge_stage, limit=limit, offset=offset
             )
 
     def get_user_trajectory_by_query_similarity(
@@ -256,14 +279,21 @@ class UserService:
         user_id: str,
         query: str,
         *,
+        course_id: str | None = None,
+        challenge_stage: int | None = None,
         threshold: float | None = None,
         limit: int | None = None,
     ) -> list[models.UserTrajectory]:
         top_k = limit or 20
+        filters: dict[str, Any] = {"user_id": user_id}
+        if course_id is not None:
+            filters["course_id"] = course_id
+        if challenge_stage is not None:
+            filters["challenge_stage"] = challenge_stage
         try:
             result = self.__rag.retriever.get_search_results(
                 query_text=query,
-                filters={"user_id": user_id},
+                filters=filters,
                 top_k=top_k,
             )
             trajectories = []
@@ -518,32 +548,39 @@ class UserService:
             return session.execute_read(tx_fn, user_id, course_id, expiry_threshold, challenge_stage)
 
     def get_all_course_hints_for_student(
-        self, user_id: str, course_id: str
+        self, user_id: str, course_id: str, challenge_stage: int | None = None
     ) -> list[models.UserTrajectory]:
         """Return all approved hints for a student in a course (no expiry filter).
 
         Used by the survey so students can review every hint they received
-        regardless of when it was read.
+        regardless of when it was read. When ``challenge_stage`` is given, only
+        hints from that specific challenge are returned — this keeps a CTF's
+        hints scoped to that CTF's own post-challenge survey instead of
+        bleeding into every other survey (pre-study, other challenges, etc.).
         """
         @unit_of_work()
         def tx_fn(
-            tx: ManagedTransaction, user_id: str, course_id: str
+            tx: ManagedTransaction, user_id: str, course_id: str, challenge_stage: int | None,
         ) -> list[models.UserTrajectory]:
+            stage_filter = "AND t.challenge_stage = $challenge_stage" if challenge_stage is not None else ""
+            params = {
+                "user_id": user_id,
+                "course_id": course_id,
+                "approval_status": models.HintApprovalStatus.APPROVED,
+            }
+            if challenge_stage is not None:
+                params["challenge_stage"] = challenge_stage
             query = f"""
             MATCH (u:{self.__user_node_name})-[:{self.__trajectory_rel_name}]->(t:{self.__trajectory_node_name})
             WHERE u.id = $user_id
               AND t.course_id = $course_id
               AND t.hint_triggered = true
               AND t.hint_approval_status = $approval_status
+              {stage_filter}
             RETURN t, u.id AS user_id
             ORDER BY t.timestamp ASC
             """
-            result = tx.run(
-                query,
-                user_id=user_id,
-                course_id=course_id,
-                approval_status=models.HintApprovalStatus.APPROVED,
-            )
+            result = tx.run(query, **params)
             items = []
             for record in result:
                 data = dict(record["t"])
@@ -552,7 +589,7 @@ class UserService:
             return items
 
         with self.__session_factory() as session:
-            return session.execute_read(tx_fn, user_id, course_id)
+            return session.execute_read(tx_fn, user_id, course_id, challenge_stage)
 
     def mark_hint_read(self, trajectory_id: str, course_id: str) -> None:
         """Record the first time a student sees a hint (sets ``hint_read_when``).

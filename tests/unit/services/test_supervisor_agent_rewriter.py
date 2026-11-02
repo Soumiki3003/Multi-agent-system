@@ -25,17 +25,12 @@ def _happy_path_mocks(mock_user_service, mock_graphrag, user_trajectory):
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = (
-        "Based on the knowledge graph node 'angr_framework', "
-        "the concept graph shows a PREREQUISITE_FOR relationship "
-        "to 'symbolic_execution'."
-    )
+    mock_retriever_result = MagicMock()
     item = MagicMock()
     item.content = "{'name': 'angr_framework'}"
     item.metadata = {"score": 0.9}
-    mock_rag_result.retriever_result.items = [item]
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    mock_retriever_result.items = [item]
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     t1 = MagicMock()
     t1.id = "t1"
@@ -71,39 +66,6 @@ def test_rewriter_strips_kg_terms(supervisor_agent_with_rewriter, _happy_path_mo
         assert term.lower() not in res.answer.lower()
 
 
-def test_raw_answer_preserved_in_trajectory(
-    supervisor_agent_with_rewriter, _happy_path_mocks
-):
-    svc = supervisor_agent_with_rewriter
-    raw = (
-        "Based on the knowledge graph node 'angr_framework', "
-        "the concept graph shows a PREREQUISITE_FOR relationship "
-        "to 'symbolic_execution'."
-    )
-    rewritten = "X is related to Y in this context."
-
-    mock_out = MagicMock()
-    mock_out.output = rewritten
-    svc._SupervisorAgentService__rewrite_agent.run_sync.return_value = mock_out
-    mock_hint_out = MagicMock()
-    mock_hint_out.output = ""
-    svc._SupervisorAgentService__hint_agent.run_sync.return_value = mock_hint_out
-
-    captured = {}
-
-    def _capture_traj(*a):
-        captured["traj"] = a[1] if len(a) > 1 else a[0]
-        return MagicMock()
-
-    _happy_path_mocks[0].add_trajectory_entry.side_effect = _capture_traj
-    svc.retrieve_context("u1", "q", "c1")
-
-    traj = captured.get("traj")
-    assert traj is not None, "Trajectory was not captured"
-    assert hasattr(traj, "raw_answer"), "Trajectory missing raw_answer field"
-    assert traj.raw_answer == raw
-
-
 def test_rewriter_called_before_returning_result(
     supervisor_agent_with_rewriter, _happy_path_mocks
 ):
@@ -122,18 +84,19 @@ def test_rewriter_called_before_returning_result(
     svc._SupervisorAgentService__rewrite_agent.run_sync.assert_called_once()
 
 
-def test_rewriter_not_called_when_no_answer(
+def test_rewriter_not_called_when_no_retrieval(
     supervisor_agent_with_rewriter, mock_user_service, mock_graphrag
 ):
+    """No retrieved chunks → the low-confidence guard returns the fallback message
+    before generation is ever attempted; the LLM is never called for nothing."""
     svc = supervisor_agent_with_rewriter
     mock_user = MagicMock()
     mock_user.id = "u1"
     mock_user_service.get_user.side_effect = lambda uid: mock_user
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = ""
-    mock_rag_result.retriever_result.items = []
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = []
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     mock_user_service.get_user_trajectory_by_query_exact_match.side_effect = (
         lambda *a, **kw: []
@@ -149,13 +112,15 @@ def test_rewriter_not_called_when_no_answer(
 
     res = svc.retrieve_context("u1", "q", "c1")
     assert res is not None
-    assert res.answer == ""
+    assert res.answer == SupervisorAgentService.RESPONSE_FALLBACK
     svc._SupervisorAgentService__rewrite_agent.run_sync.assert_not_called()
 
 
-def test_backward_compat_no_rewrite_agent(
+def test_no_rewrite_agent_configured_returns_fallback(
     mock_user_service, mock_graphrag, user_trajectory
 ):
+    """Without a rewrite/generation agent there's no way to produce an answer from
+    the retrieved chunks at all — the merged generation step needs that agent."""
     svc = SupervisorAgentService(
         user_service=mock_user_service,
         graph_rag=mock_graphrag,
@@ -166,11 +131,12 @@ def test_backward_compat_no_rewrite_agent(
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    raw_answer = "Knowledge graph node 'X' shows concept 'Y'."
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = raw_answer
-    mock_rag_result.retriever_result.items = []
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    item = MagicMock()
+    item.content = "Knowledge graph node 'X' shows concept 'Y'."
+    item.metadata = {"score": 0.9}
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = [item]
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     mock_user_service.get_user_trajectory_by_query_exact_match.side_effect = (
         lambda *a, **kw: []
@@ -185,4 +151,4 @@ def test_backward_compat_no_rewrite_agent(
 
     res = svc.retrieve_context("u1", "q", "c1")
     assert res is not None
-    assert res.answer == raw_answer
+    assert res.answer == SupervisorAgentService.RESPONSE_FALLBACK

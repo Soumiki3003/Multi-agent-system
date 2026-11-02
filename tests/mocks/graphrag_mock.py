@@ -9,6 +9,9 @@ def mock_graphrag(mocker):
     mock_retriever = mocker.MagicMock(spec=VectorRetriever)
     mock_llm = mocker.MagicMock(spec=LLMInterface)
     instance = GraphRAG(retriever=mock_retriever, llm=mock_llm)
-    mock = mocker.MagicMock(spec=GraphRAG)
-    mock.search = mocker.MagicMock(side_effect=instance.search)
+    # spec'd against the instance (not the class) so `.retriever` is exposed —
+    # supervisor_agent calls rag.retriever.search(...) directly now, bypassing
+    # GraphRAG.search()'s LLM-generation step entirely.
+    mock = mocker.MagicMock(spec=instance)
+    mock.retriever = mock_retriever
     return mock

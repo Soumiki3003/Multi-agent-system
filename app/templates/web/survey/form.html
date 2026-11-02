@@ -194,34 +194,90 @@
                     <h2 class="text-base font-semibold text-primary mb-1">AI Assistant Feedback</h2>
                     <p class="text-xs text-base-content/50 mb-3">Help us improve by rating the quality of the AI responses you received.</p>
 
+                    {% if survey.id == 'post_study' %}
                     <div class="form-control mb-4">
                         <label class="label py-1">
-                            <span class="label-text text-sm font-medium">Overall, was the AI assistant's output helpful?</span>
+                            <span class="label-text text-sm font-medium">How was the agent helpful/unhelpful in solving the challenges?</span>
                         </label>
-                        <div class="flex flex-col gap-1 pl-2">
-                            {% for opt in ['Yes, very helpful', 'Somewhat helpful', 'Not helpful'] %}
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <input type="radio" name="llm_output_helpful" value="{{ opt }}"
-                                       class="radio radio-sm radio-primary" />
-                                <span class="text-sm">{{ opt }}</span>
-                            </label>
-                            {% endfor %}
-                        </div>
+                        <textarea name="agent_helpful_unhelpful" rows="4"
+                                  class="textarea textarea-bordered text-sm w-full"
+                                  placeholder="Your answer here…"
+                                  required></textarea>
                     </div>
 
                     <div class="form-control mb-4">
-                        <label class="label py-1">
-                            <span class="label-text text-sm font-medium">Did the AI assistant provide any incorrect or misleading information?</span>
-                        </label>
-                        <div class="flex flex-col gap-1 pl-2">
-                            {% for opt in ['Yes', 'No', 'Not sure'] %}
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <input type="radio" name="llm_hallucination" value="{{ opt }}"
-                                       class="radio radio-sm radio-primary" />
-                                <span class="text-sm">{{ opt }}</span>
-                            </label>
-                            {% endfor %}
+                        <p class="text-sm font-medium mb-2">Rate each statement (1 = Strongly Disagree, 5 = Strongly Agree):</p>
+                        <div class="overflow-x-auto">
+                            <table class="table table-xs w-full border border-base-200 rounded-lg">
+                                <thead class="bg-base-200">
+                                    <tr>
+                                        <th class="text-xs w-full">Statement</th>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <th class="text-center text-xs">{{ n }}</th>
+                                        {% endfor %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr class="bg-base-100">
+                                        <td class="text-xs leading-snug py-2">1. This tutoring agent taught me underlying concepts and guided me toward the right answer, rather than simply giving away hints.</td>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <td class="text-center">
+                                            <input type="radio" name="agent_teaches_concepts_rating" value="{{ n }}"
+                                                   class="radio radio-xs radio-primary" />
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
+                                    <tr class="bg-base-200/40">
+                                        <td class="text-xs leading-snug py-2">2. This tutoring agent helped me solve CTF challenges more effectively than commercial LLMs (e.g., GPT, Claude).</td>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <td class="text-center">
+                                            <input type="radio" name="agent_effectiveness_vs_llms_rating" value="{{ n }}"
+                                                   class="radio radio-xs radio-primary" />
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
+                        <p class="text-xs text-base-content/50 mt-1">1 = Strongly Disagree &nbsp;·&nbsp; 2 = Disagree &nbsp;·&nbsp; 3 = Neutral &nbsp;·&nbsp; 4 = Agree &nbsp;·&nbsp; 5 = Strongly Agree</p>
+                    </div>
+                    {% endif %}
+
+                    <div class="form-control mb-4">
+                        <p class="text-sm font-medium mb-2">Rate each statement (1 = Strongly Disagree, 5 = Strongly Agree):</p>
+                        <div class="overflow-x-auto">
+                            <table class="table table-xs w-full border border-base-200 rounded-lg">
+                                <thead class="bg-base-200">
+                                    <tr>
+                                        <th class="text-xs w-full">Statement</th>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <th class="text-center text-xs">{{ n }}</th>
+                                        {% endfor %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr class="bg-base-100">
+                                        <td class="text-xs leading-snug py-2">Overall, the AI assistant's output was helpful.</td>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <td class="text-center">
+                                            <input type="radio" name="llm_output_helpful" value="{{ n }}"
+                                                   class="radio radio-xs radio-primary" />
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
+                                    <tr class="bg-base-200/40">
+                                        <td class="text-xs leading-snug py-2">The AI assistant provided correct and truthful information.</td>
+                                        {% for n in [1,2,3,4,5] %}
+                                        <td class="text-center">
+                                            <input type="radio" name="llm_hallucination" value="{{ n }}"
+                                                   class="radio radio-xs radio-primary" />
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="text-xs text-base-content/50 mt-1">1 = Strongly Disagree &nbsp;·&nbsp; 2 = Disagree &nbsp;·&nbsp; 3 = Neutral &nbsp;·&nbsp; 4 = Agree &nbsp;·&nbsp; 5 = Strongly Agree</p>
                     </div>
 
                     <div class="form-control mb-4">

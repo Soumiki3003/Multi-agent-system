@@ -47,6 +47,7 @@ gateways:
         vector:
           name: "index_content_chunk_vector"
           label: "ContentChunk"
+          field_name: "chunk_vector"
 
   neo4j:
     uri: ${NEO4J_URI:neo4j://127.0.0.1:7687}

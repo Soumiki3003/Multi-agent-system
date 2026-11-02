@@ -335,7 +335,7 @@ def _store_chunks(chunks: list[models.ContentChunk], container, course_id: str) 
             try:
                 for chunk, vector in zip(batch, vectors):
                     props = chunk.model_dump()
-                    props["vector"] = vector
+                    props["chunk_vector"] = vector
                     tx.run(
                         "MATCH (root {id: $course_id}) "
                         "CREATE (c:ContentChunk $props) "

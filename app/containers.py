@@ -40,6 +40,7 @@ _ROOT_FOLDER = Path(__file__).parent
 _TEMPLATES_FOLDER = _ROOT_FOLDER / "templates"
 _STATIC_FOLDER = _ROOT_FOLDER / "static"
 _UPLOADS_FOLDER = _STATIC_FOLDER / "uploads"
+_CTF_REFERENCE_FILE = _ROOT_FOLDER.parent / "angr_summary.md"
 
 
 class Core(containers.DeclarativeContainer):
@@ -58,6 +59,11 @@ class Core(containers.DeclarativeContainer):
 class AI(containers.DeclarativeContainer):
     config = providers.Configuration()
 
+    # The app serves requests one at a time (see main.py); an LLM call that hangs
+    # would otherwise block every other student indefinitely instead of just
+    # failing that one request.
+    _AGENT_TIMEOUT_SECONDS = 30
+
     prompt_template_env = providers.Singleton(
         Environment,
         loader=FileSystemLoader(_TEMPLATES_FOLDER / "prompts"),
@@ -67,6 +73,9 @@ class AI(containers.DeclarativeContainer):
     default_agent = providers.Singleton(
         Agent,
         model=config.agents.default.model.required(),
+        # Hint and rewrite/answer generation both run through this agent — cap
+        # output so a "repeated ask" can't balloon into a multi-section essay.
+        model_settings={"max_tokens": 600, "timeout": _AGENT_TIMEOUT_SECONDS},
         retries=3,
     )
 
@@ -82,12 +91,17 @@ class AI(containers.DeclarativeContainer):
             prompts.get_knowledge_system_prompt,
             env=prompt_template_env,
         ),
+        model_settings={"timeout": _AGENT_TIMEOUT_SECONDS},
         retries=3,
     )
 
     graph_agent = providers.Singleton(
         Agent,
         model=config.agents.graph.model.required(),
+        # Powers GraphRAG's internal answer draft (never shown to the student —
+        # it's rewritten by supervisor_agent before reaching them), so it never
+        # needs much room either.
+        model_settings={"max_tokens": 600, "timeout": _AGENT_TIMEOUT_SECONDS},
         retries=3,
     )
 
@@ -152,6 +166,7 @@ class Gateways(containers.DeclarativeContainer):
                 gateways.Neo4jGraphRAGVectorIndexParams,
                 name=config.rag.indexes.content_chunk.vector.name.required(),
                 label=config.rag.indexes.content_chunk.vector.label.required(),
+                field_name=config.rag.indexes.content_chunk.vector.field_name.required(),
             ),
         ),
     )
@@ -190,10 +205,20 @@ class Services(containers.DeclarativeContainer):
         services.ChatService,
         session_factory=gateways.neo4j_session.provider,
     )
+    ctf_reference = providers.Singleton(
+        services.CTFReferenceService,
+        file_path=str(_CTF_REFERENCE_FILE),
+    )
     supervisor_agent = providers.Factory(
         services.SupervisorAgentService,
         user_service=user,
+        # Content-chunk KG is the sole retrieval source for answer generation —
+        # trajectory_graphrag stays wired to `user` (above) for repeat-question/hint
+        # detection only. It must never be plugged in here: UserTrajectory nodes have
+        # no `content` property, so the retriever's result_formatter falls back to
+        # str(node), which dumps the node's full embedding vector into the LLM prompt.
         graph_rag=gateways.content_chunk_graphrag,
+        ctf_reference=ctf_reference,
         hint_agent=ai.default_agent,
         rewrite_agent=ai.default_agent,
         similarity_threshold=0.70,

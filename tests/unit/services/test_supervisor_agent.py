@@ -9,6 +9,7 @@ def supervisor_agent(mock_user_service, mock_graphrag):
         user_service=mock_user_service,
         graph_rag=mock_graphrag,
         hint_agent=MagicMock(),
+        rewrite_agent=MagicMock(),
     )
 
 
@@ -32,15 +33,13 @@ def test_retrieve_context_success(supervisor_agent, mock_user_service, mock_grap
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = "Hello"
-
     item = MagicMock()
     item.content = "{'name': 'TestNode'}"
     item.metadata = {"score": 0.9}
-    mock_rag_result.retriever_result.items = [item]
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = [item]
 
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     t1 = MagicMock()
     t1.id = "t1"
@@ -54,13 +53,18 @@ def test_retrieve_context_success(supervisor_agent, mock_user_service, mock_grap
     mock_hint_out = MagicMock()
     mock_hint_out.output = "Here is a hint"
     supervisor_agent._SupervisorAgentService__hint_agent.run_sync.return_value = mock_hint_out
+    supervisor_agent._SupervisorAgentService__rewrite_agent.run_sync.return_value = (
+        MagicMock(output="Hello")
+    )
 
     res = supervisor_agent.retrieve_context("u1", "how do i run this", "c1")
 
     assert res is not None
     assert res.answer == "Hello"
-    assert res.hint_text == "Here is a hint"
-    assert res.hint_reason == "Procedural impasse (stuck on how-to steps)"
+    # Only one prior similar query (below the default repeat threshold of 2) —
+    # no hint should be triggered yet.
+    assert res.hint_text is None
+    assert res.hint_reason is None
 
 
 def test_retrieve_context_repeated_query(supervisor_agent, mock_user_service, mock_graphrag, user_trajectory):
@@ -69,10 +73,12 @@ def test_retrieve_context_repeated_query(supervisor_agent, mock_user_service, mo
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = "Hello again"
-    mock_rag_result.retriever_result.items = []
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    item = MagicMock()
+    item.content = "{'name': 'TestNode'}"
+    item.metadata = {"score": 0.9}
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = [item]
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     t1 = MagicMock(); t1.id = "t1"
     t2 = MagicMock(); t2.id = "t2"
@@ -83,6 +89,9 @@ def test_retrieve_context_repeated_query(supervisor_agent, mock_user_service, mo
     mock_hint_out = MagicMock()
     mock_hint_out.output = "Another Hint"
     supervisor_agent._SupervisorAgentService__hint_agent.run_sync.return_value = mock_hint_out
+    supervisor_agent._SupervisorAgentService__rewrite_agent.run_sync.return_value = (
+        MagicMock(output="Hello again")
+    )
 
     res = supervisor_agent.retrieve_context("u1", "query", "c1")
 

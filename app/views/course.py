@@ -1,6 +1,6 @@
 import re
 from dependency_injector.wiring import Provide, inject
-from flask import Blueprint, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, Response, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
 from flask_pydantic import validate
 
@@ -8,6 +8,7 @@ from app import controllers, schemas, services
 from app.challenges import UNLOCK_SEQUENCE, POST_STUDY_STAGE, build_breadcrumb
 from app.schemas.knowledge import ALLOWED_CHILDREN, BLOOM_LEVELS
 from app.containers import Application
+from app.services.chat_export import build_chat_transcript_pdf
 from app.views.guards import roles_required
 
 app = Blueprint("course", __name__)
@@ -538,6 +539,45 @@ def api_student_chat(
         stage=stage,
         student_id=student_id,
         course_id=course_id,
+    )
+
+
+@app.route("/course/<course_id>/api/student-chat/<student_id>/pdf", methods=["GET"])
+@roles_required("instructor")
+@inject
+def api_student_chat_pdf(
+    course_id: str,
+    student_id: str,
+    *,
+    course_controller: controllers.CourseController = Provide[
+        Application.controllers.course_controller
+    ],
+):
+    """Download a student's chat transcript for a specific CTF stage as a PDF."""
+    stage = request.args.get("stage", 1, type=int)
+    messages = course_controller.get_challenge_history(student_id, course_id, stage)
+
+    course = course_controller.get_course(course_id)
+    try:
+        members = course_controller.get_course_members(course_id)
+        info_map = {s.id: {"name": s.name, "email": s.email} for s in members.get("students", [])}
+        info = info_map.get(student_id, {})
+        student_name = info.get("name", student_id)
+        student_email = info.get("email", "")
+    except Exception:
+        student_name = student_id
+        student_email = ""
+
+    ctf_label = f"CTF-{stage - 1:02d}"
+    pdf_bytes = build_chat_transcript_pdf(
+        course.name, student_name, student_email, ctf_label, messages
+    )
+
+    filename = f"chat_{ctf_label}_{student_name.replace(' ', '_')}.pdf"
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

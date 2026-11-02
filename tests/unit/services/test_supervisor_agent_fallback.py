@@ -14,26 +14,29 @@ def supervisor_agent_with_threshold(mock_user_service, mock_graphrag):
         user_service=mock_user_service,
         graph_rag=mock_graphrag,
         hint_agent=MagicMock(),
+        rewrite_agent=MagicMock(),
         confidence_threshold=0.6,
     )
 
 
 @pytest.fixture
-def _happy_path_setup(mock_user_service, mock_graphrag, user_trajectory):
-    """Common setup: valid user, RAG result with a retriever item, no repeated queries."""
+def _happy_path_setup(mock_user_service, mock_graphrag, user_trajectory, supervisor_agent_with_threshold):
+    """Common setup: valid user, retriever with an item, no repeated queries."""
     mock_user = MagicMock()
     mock_user.id = "u1"
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = "Normal answer about the topic"
-
     item = MagicMock()
     item.content = "{'name': 'TestNode'}"
 
-    mock_rag_result.retriever_result.items = [item]
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = [item]
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
+
+    supervisor_agent_with_threshold._SupervisorAgentService__rewrite_agent.run_sync.return_value = (
+        MagicMock(output="Normal answer about the topic")
+    )
 
     t1 = MagicMock()
     t1.id = "t1"
@@ -48,7 +51,7 @@ def _happy_path_setup(mock_user_service, mock_graphrag, user_trajectory):
     t_hist.query = "unrelated past query"
     mock_user_service.get_user_trajectory.side_effect = lambda *a, **kw: [t_hist]
 
-    return item, mock_rag_result
+    return item, mock_retriever_result
 
 
 def test_scores_above_threshold_returns_normal_answer(
@@ -98,7 +101,7 @@ def test_low_confidence_query_is_logged(
 
     assert res is not None
     assert res.answer == SupervisorAgentService.RESPONSE_FALLBACK
-    assert any("Low confidence" in record.message for record in caplog.records)
+    assert any("RAG retrieval insufficient" in record.message for record in caplog.records)
 
 
 def test_score_exactly_at_threshold_returns_normal_answer(
@@ -117,19 +120,19 @@ def test_score_exactly_at_threshold_returns_normal_answer(
     assert res.answer == "Normal answer about the topic"
 
 
-def test_no_scores_returns_normal_answer(
+def test_no_scores_returns_fallback(
     supervisor_agent_with_threshold, mock_user_service, mock_graphrag, user_trajectory
 ):
-    """When retriever returns no items (empty scores), normal answer is returned."""
+    """No retrieved items means no scores, which is treated as low confidence —
+    fallback message is returned, same as any other empty-retrieval case."""
     mock_user = MagicMock()
     mock_user.id = "u1"
     mock_user_service.get_user.side_effect = lambda uid: mock_user
     mock_user_service.add_trajectory_entry.side_effect = lambda *a: user_trajectory
 
-    mock_rag_result = MagicMock()
-    mock_rag_result.answer = "Answer with no retriever results"
-    mock_rag_result.retriever_result.items = []
-    mock_graphrag.search.side_effect = lambda *a, **kw: mock_rag_result
+    mock_retriever_result = MagicMock()
+    mock_retriever_result.items = []
+    mock_graphrag.retriever.search.side_effect = lambda *a, **kw: mock_retriever_result
 
     mock_user_service.get_user_trajectory_by_query_exact_match.side_effect = (
         lambda *a, **kw: []
@@ -145,4 +148,4 @@ def test_no_scores_returns_normal_answer(
     res = svc.retrieve_context("u1", "query", "c1")
 
     assert res is not None
-    assert res.answer == "Answer with no retriever results"
+    assert res.answer == SupervisorAgentService.RESPONSE_FALLBACK

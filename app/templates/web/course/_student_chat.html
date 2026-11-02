@@ -1,24 +1,39 @@
 {% set ctf_label = 'CTF-%02d' | format(stage - 1) %}
 {% if messages %}
-<div class="flex flex-col gap-2 max-h-96 overflow-y-auto px-1 py-2">
-    <p class="text-xs text-base-content/50 mb-1">
-        {{ ctf_label }} &mdash; {{ messages | length }} message{{ 's' if messages | length != 1 else '' }}
-    </p>
-    {% for msg in messages %}
-    <div class="flex {% if msg.role == 'user' %}justify-end{% else %}justify-start{% endif %}">
-        <div class="max-w-[75%] px-3 py-2 rounded-xl text-xs
-            {% if msg.role == 'user' %}
-                bg-primary text-primary-content rounded-br-sm
-            {% else %}
-                bg-base-300 text-base-content rounded-bl-sm
-            {% endif %}">
-            <p class="font-semibold opacity-60 mb-0.5 text-[10px] uppercase tracking-wide">
-                {{ 'Student' if msg.role == 'user' else 'Assistant' }}
-            </p>
-            <p class="whitespace-pre-wrap leading-relaxed">{{ msg.content }}</p>
+<div class="flex flex-col gap-2 px-1 py-2">
+    <div class="flex items-center justify-between mb-1 gap-2">
+        <p class="text-xs text-base-content/50">
+            {{ ctf_label }} &mdash; {{ messages | length }} message{{ 's' if messages | length != 1 else '' }}
+        </p>
+        <div class="flex gap-1 flex-shrink-0">
+            <button type="button" class="btn btn-xs btn-outline copy-chat-btn">
+                Copy
+            </button>
+            <a class="btn btn-xs btn-outline"
+               href="{{ url_for('course.api_student_chat_pdf', course_id=course_id, student_id=student_id) }}?stage={{ stage }}"
+               target="_blank" rel="noopener">
+                Export PDF
+            </a>
         </div>
     </div>
-    {% endfor %}
+    <div id="chat-transcript">
+        {% for msg in messages %}
+        <div class="flex chat-msg mb-2 {% if msg.role == 'user' %}justify-end{% else %}justify-start{% endif %}"
+             data-speaker="{{ 'Student' if msg.role == 'user' else 'Assistant' }}">
+            <div class="max-w-[75%] px-3 py-2 rounded-xl text-xs
+                {% if msg.role == 'user' %}
+                    bg-primary text-primary-content rounded-br-sm
+                {% else %}
+                    bg-base-300 text-base-content rounded-bl-sm
+                {% endif %}">
+                <p class="font-semibold opacity-60 mb-0.5 text-[10px] uppercase tracking-wide">
+                    {{ 'Student' if msg.role == 'user' else 'Assistant' }}
+                </p>
+                <p class="whitespace-pre-wrap leading-relaxed chat-msg-content">{{ msg.content }}</p>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
 </div>
 {% else %}
 <p class="text-xs text-base-content/40 text-center py-6">No chat messages recorded for {{ ctf_label }}.</p>

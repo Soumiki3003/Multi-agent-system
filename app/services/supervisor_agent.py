@@ -10,7 +10,39 @@ from pydantic_ai import Agent
 from app import models
 from enum import StrEnum
 
+from .ctf_reference import CTFReferenceService
 from .user import UserService
+
+
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+# Signals that a message is really a graded survey/knowledge-test/quiz question
+# (see app/surveys/data.py) rather than a genuine question about the challenge —
+# explicit mentions of the instruments themselves, plus the Likert/AI-feedback
+# phrasing used verbatim in their question labels.
+_SURVEY_KEYWORDS = [
+    "survey",
+    "questionnaire",
+    "knowledge test",
+    "pre-study",
+    "post-study",
+    "post-challenge",
+    "quiz",
+    "likert",
+    "strongly agree",
+    "strongly disagree",
+    "select the single best answer",
+    "select all that apply",
+    "rate each statement",
+    "learning outcome",
+    "participant id",
+    "was the ai assistant",
+    "did the ai assistant provide",
+    "incorrect or misleading information",
+]
+# A copy-pasted multiple-choice question (as used throughout data.py) looks like
+# several "A) ...", "B. ...", "C) ..." option lines in a row.
+_MC_OPTION_LINE_RE = re.compile(r"(?m)^\s*[a-dA-D][\).]\s+\S")
 
 
 class SupervisorResult(BaseModel):
@@ -29,6 +61,12 @@ class Intent(StrEnum):
 
 class SupervisorAgentService:
     RESPONSE_FALLBACK = "I couldn't find relevant information to answer your question. Please try rephrasing."
+    SURVEY_DECLINE_RESPONSE = (
+        "That looks like a survey, quiz, or knowledge-test question rather than a "
+        "question about your current challenge — I can't help answer those, since "
+        "they're meant to reflect your own understanding. Happy to help if you have "
+        "a genuine question about the challenge itself!"
+    )
 
     INTENT_KEYWORDS: dict[Intent, list[str]] = {
         Intent.DEFINITION: [
@@ -96,40 +134,46 @@ class SupervisorAgentService:
         hint_agent: Agent,
         rewrite_agent: Agent | None = None,
         content_rag: GraphRAG | None = None,
+        ctf_reference: CTFReferenceService | None = None,
         top_k: int = 5,
         similarity_threshold: float = 0.85,
         hint_by_similarity_threshold: int = 2,
-        hint_procedural_history_limit: int = 3,
         confidence_threshold: float = 0.6,
-        procedural_keywords: list[str] = [
-            "run",
-            "fix",
-            "load",
-            "execute",
-            "implement",
-            "solve",
-            "compile",
-            "test",
-            "error",
-            "code",
-        ],
     ):
         self.__user_service = user_service
         self.__graph_rag = graph_rag
         self.__content_rag = content_rag
+        self.__ctf_reference = ctf_reference
         self.__hint_agent = hint_agent
         self.__rewrite_agent = rewrite_agent
         self.__top_k = top_k
         self.__similarity_threshold = similarity_threshold
         self.__hint_by_similarity_threshold = hint_by_similarity_threshold
-        self.__hint_procedural_history_limit = hint_procedural_history_limit
-        self.__procedural_keywords = procedural_keywords
         self.__confidence_threshold = confidence_threshold
         self.__logger = logging.getLogger(__name__)
 
+    # Below this many messages, formatting the transcript verbatim is cheaper than
+    # spending an extra LLM call to summarize it.
+    __HISTORY_SUMMARY_TRIGGER = 4
+    # Always keep the most recent exchange verbatim (in the student's own words)
+    # even when older turns get summarized.
+    __HISTORY_RECENT_VERBATIM = 2
+    # A hint is a 1-2 sentence conceptual nudge, not a code review — it never
+    # needs the full transcript or a verbatim pasted code block the way the
+    # rewrite/answer agent does. Cap what reaches the hint agent so a long
+    # student message or a short (not-yet-summarized) history doesn't get
+    # resent in full just to produce a short nudge.
+    __HINT_CONTEXT_CHAR_LIMIT = 400
+
+    def __cap_for_hint(self, text: str) -> str:
+        text = text.strip()
+        if len(text) <= self.__HINT_CONTEXT_CHAR_LIMIT:
+            return text
+        return text[: self.__HINT_CONTEXT_CHAR_LIMIT].rstrip() + "…"
+
     @staticmethod
     def __format_history(message_history: list[LLMMessage] | None) -> str:
-        """Render the last N exchanges as plain text for inclusion in LLM prompts."""
+        """Render exchanges as plain text for inclusion in LLM prompts."""
         if not message_history:
             return ""
         lines = []
@@ -138,24 +182,42 @@ class SupervisorAgentService:
             lines.append(f"{role}: {msg['content']}")
         return "\n".join(lines)
 
-    def __rewrite_query_for_retrieval(
-        self, query: str, message_history: list[LLMMessage] | None = None
-    ) -> str:
-        """Rephrase an informal student question into precise technical terms for KG retrieval."""
-        if not self.__rewrite_agent:
-            return query
-        history_block = self.__format_history(message_history)
-        context = f"\n\nRecent conversation:\n{history_block}" if history_block else ""
-        prompt = (
-            "Rephrase the following student question into precise technical terms "
-            "suitable for searching a knowledge graph with domain-specific node labels. "
-            "Return only the rephrased query with no explanation."
-            f"{context}\n\n"
-            f"Student question: {query}"
+    def __summarize_history(self, message_history: list[LLMMessage] | None) -> str:
+        """Condense prior turns into a short context block, computed once per student
+        turn and reused by every downstream call (hint agent, rewrite agent).
+
+        Forwarding the full transcript to every agent call — and to GraphRAG, which
+        internally re-summarizes it yet again just to build a retrieval query — pays
+        for the same conversation history multiple times over. Short histories are
+        cheap enough to include verbatim; longer ones are compressed with a single
+        summarization call instead.
+        """
+        if not message_history:
+            return ""
+
+        if len(message_history) <= self.__HISTORY_SUMMARY_TRIGGER or not self.__rewrite_agent:
+            recent = self.__format_history(message_history)
+            return f"\n\nRecent conversation:\n{recent}" if recent else ""
+
+        older = message_history[: -self.__HISTORY_RECENT_VERBATIM]
+        recent = self.__format_history(message_history[-self.__HISTORY_RECENT_VERBATIM :])
+        summary_prompt = (
+            "Summarize this tutoring conversation in at most 60 words: what topics "
+            "were covered, what specific facts/code/values were already revealed to "
+            "the student, and where they seem stuck. Plain prose, no preamble.\n\n"
+            f"{self.__format_history(older)}"
         )
-        rephrased = self.__rewrite_agent.run_sync(prompt).output.strip()
-        self.__logger.info(f"Query rewritten for retrieval: '{query}' → '{rephrased}'")
-        return rephrased
+        try:
+            summary = self.__rewrite_agent.run_sync(summary_prompt).output.strip()
+        except Exception as e:
+            self.__logger.warning(f"History summarization failed, using recent turns only: {e}")
+            return f"\n\nRecent conversation:\n{recent}" if recent else ""
+
+        self.__logger.info(f"Summarized {len(older)} older messages: {summary}")
+        return (
+            f"\n\nConversation so far (summarized): {summary}"
+            f"\n\nMost recent exchange:\n{recent}"
+        )
 
     @staticmethod
     def __node_label_from_item(item) -> str:
@@ -186,35 +248,53 @@ class SupervisorAgentService:
     def __retrieve_node_metadata(
         self,
         query: str,
-        message_history: list[LLMMessage] | None = None,
         *,
         graph_rag: GraphRAG | None = None,
     ):
+        # Retrieval only — calls the retriever directly instead of GraphRAG.search(),
+        # which would additionally spend an LLM call generating a draft answer from
+        # these same chunks. That draft was never shown to the student; it was only
+        # ever fed into __generate_response as a "reference answer" alongside the
+        # very same chunks sent a second time. __generate_response already builds
+        # the real answer from these chunks directly, so that draft call is pure
+        # waste — both the extra round-trip and the doubled chunk tokens.
         rag = graph_rag or self.__graph_rag
         start_time = time.time()
-        result = rag.search(
-            query,
-            message_history=message_history,
-            retriever_config={"top_k": self.__top_k},
-            return_context=True,
-            response_fallback=self.RESPONSE_FALLBACK,
-        )
+        retriever_result = rag.retriever.search(query_text=query, top_k=self.__top_k)
         response_time_sec = round(time.time() - start_time, 2)
         self.__logger.info(f"Context retrieved in {response_time_sec} seconds")
 
         self.__logger.info("Parsing retriever results for node metadata...")
         retrieved_nodes, scores = [], []
-        if retriever_result := result.retriever_result:
-            try:
-                for item in retriever_result.items:
-                    retrieved_nodes.append(self.__node_label_from_item(item))
-                    if isinstance(item.metadata, dict):
-                        scores.append(item.metadata.get("score"))
-            except Exception as e:
-                self.__logger.warning(f"Failed to parse retriever result metadata: {e}")
+        try:
+            for item in retriever_result.items:
+                retrieved_nodes.append(self.__node_label_from_item(item))
+                if isinstance(item.metadata, dict):
+                    scores.append(item.metadata.get("score"))
+        except Exception as e:
+            self.__logger.warning(f"Failed to parse retriever result metadata: {e}")
 
         self.__logger.info(f"Retrieved nodes: {len(retrieved_nodes)}")
-        return result, retrieved_nodes, scores, response_time_sec
+        return retriever_result, retrieved_nodes, scores, response_time_sec
+
+    @staticmethod
+    def __looks_like_survey_request(query: str) -> bool:
+        """Guard against students pasting graded survey/knowledge-test questions
+        into the tutor chat instead of answering them independently.
+
+        The per-challenge "Post-Challenge Knowledge Test" questions (see
+        app/surveys/data.py) cover the exact same angr/CTF concepts this tutor is
+        built to explain, and the survey is one modal click away on the same chat
+        page — so a copy-pasted quiz question is retrieval-relevant and would
+        otherwise sail straight through as a normal, answerable question. Matches
+        either an explicit mention of the survey/test itself, or the structural
+        shape of a pasted multiple-choice question (several "A) ..."/"B. ..."
+        option lines), since students won't always name it as a "survey".
+        """
+        q_lower = query.lower()
+        if any(kw in q_lower for kw in _SURVEY_KEYWORDS):
+            return True
+        return len(_MC_OPTION_LINE_RE.findall(query)) >= 2
 
     def __classify_intent(self, query: str) -> str:
         """Classify student query intent into categories.
@@ -246,18 +326,30 @@ class SupervisorAgentService:
                 return interaction_type
         return Intent.CONTEXT_REQUEST
 
-    def __get_similar_trajectory_queries(self, query: str, *, user_id: str):
+    def __get_similar_trajectory_queries(
+        self,
+        query: str,
+        *,
+        user_id: str,
+        course_id: str,
+        challenge_stage: int | None,
+    ):
+        # Scoped to the current challenge: a question asked in an earlier challenge
+        # must not count as a "repeat" here, or the student would walk into a brand
+        # new challenge and immediately get the REPEATED-ASK/full-code treatment (or
+        # a stale hint) meant for someone stuck on a different problem entirely.
         trajectories: list[str] = []
 
         # TODO: Why not only use the query_similarity as a exact match would be always present in the list?
         for item in self.__user_service.get_user_trajectory_by_query_exact_match(
-            user_id, query
+            user_id, query, course_id=course_id, challenge_stage=challenge_stage
         ):
             if item.id and item.id not in trajectories:
                 trajectories.append(item.id)
 
         for item in self.__user_service.get_user_trajectory_by_query_similarity(
-            user_id, query, threshold=self.__similarity_threshold
+            user_id, query, course_id=course_id, challenge_stage=challenge_stage,
+            threshold=self.__similarity_threshold,
         ):
             if item.id and item.id not in trajectories:
                 trajectories.append(item.id)
@@ -270,46 +362,28 @@ class SupervisorAgentService:
         query_repeat_count: int,
         *,
         retrieved_nodes: list[str],
-        user_id: str,
-        message_history: list[LLMMessage] | None = None,
+        history_context: str = "",
     ):
+        # The only hint trigger: the student has asked this same/similar question
+        # (query_repeat_count, from __get_similar_trajectory_queries) at least
+        # this many times already within this challenge.
         hint_triggered = query_repeat_count >= self.__hint_by_similarity_threshold
         hint_reason = None
         hint_text = None
-        history_block = self.__format_history(message_history)
-        history_context = f"\n\nRecent conversation:\n{history_block}" if history_block else ""
 
         if hint_triggered:
+            hint_query = self.__cap_for_hint(query)
+            hint_history_context = self.__cap_for_hint(history_context) if history_context else ""
             hint_reason = "Repeated query (possible confusion)"
             hint_prompt = (
-                f"Provide a short, encouraging hint to help the student progress on: '{query}'. "
-                f"Focus on conceptual reinforcement rather than giving the answer directly. "
+                f"In 1-2 short sentences, give an encouraging hint to help the student "
+                f"progress on: '{hint_query}'. Focus on conceptual reinforcement rather than "
+                f"giving the answer directly. Be brief — no preamble, no restating the question. "
                 f"Context nodes: {retrieved_nodes[:3]}"
-                f"{history_context}"
+                f"{hint_history_context}"
             )
             hint_text = self.__hint_agent.run_sync(hint_prompt).output.strip()
             self.__logger.info(f"Hint triggered: {hint_reason} -> {hint_text}")
-        else:
-            last_trajectories = self.__user_service.get_user_trajectory(
-                user_id, limit=self.__hint_procedural_history_limit
-            )
-            recent_queries = [item.query.lower() for item in last_trajectories]
-            recent_queries.append(query.lower())
-
-            def is_procedural(q):
-                return any(k in q for k in self.__procedural_keywords)
-
-            if all(is_procedural(q) for q in recent_queries + [query.lower()]):
-                hint_triggered = True
-                hint_reason = "Procedural impasse (stuck on how-to steps)"
-                hint_prompt = (
-                    f"The student has been asking several procedural questions in a row. "
-                    f"Generate a reflective, conceptual hint encouraging them to focus on the underlying idea of '{query}'. "
-                    f"Do not reveal exact code; instead, suggest understanding the concept that supports this step."
-                    f"{history_context}"
-                )
-                hint_text = self.__hint_agent.run_sync(hint_prompt).output.strip()
-                self.__logger.info(f"Hint triggered: {hint_reason} -> {hint_text}")
 
         return hint_triggered, hint_reason, hint_text
 
@@ -386,23 +460,31 @@ class SupervisorAgentService:
                 )
             return "\n\n".join(contents[:5])
 
-    def __rewrite_response(
+    @staticmethod
+    def __trim_ground_truth(ground_truth: str, query_repeat_count: int) -> str:
+        """Strip the solution code block out of the ground-truth guide on the first ask.
+
+        The scaffolding rules below already forbid showing full code at that stage,
+        so sending the guide's full solution script anyway — as happened on every
+        single turn regardless of scaffolding level — just spends tokens on content
+        the model is simultaneously instructed to ignore.
+        """
+        if query_repeat_count > 0:
+            return ground_truth
+        return _CODE_FENCE_RE.sub(
+            "*(solution code withheld until a later attempt)*", ground_truth
+        ).strip()
+
+    def __generate_response(
         self,
-        raw_answer: str,
         query: str,
-        message_history: list[LLMMessage] | None = None,
+        history_context: str = "",
         query_repeat_count: int = 0,
         retriever_items: list | None = None,
+        ground_truth: str | None = None,
     ) -> str:
-        if not self.__rewrite_agent or not raw_answer:
-            return raw_answer
-
-        history_block = self.__format_history(message_history)
-        history_context = (
-            f"\n\nRecent conversation:\n{history_block}"
-            if history_block
-            else ""
-        )
+        if not self.__rewrite_agent or not retriever_items:
+            return self.RESPONSE_FALLBACK
 
         # Build a grounding block from raw retrieved chunks so the LLM
         # cannot hallucinate code or facts that aren't in the course material.
@@ -415,9 +497,23 @@ class SupervisorAgentService:
                     chunks.append(content.strip())
             if chunks:
                 source_block = (
-                    "\n\n## Course material (ONLY use facts and code from here — do NOT invent anything):\n"
+                    "\n\n## Course material retrieved from the knowledge graph "
+                    "(ONLY use facts and code from here — do NOT invent anything):\n"
                     + "\n---\n".join(chunks)
                 )
+
+        # The knowledge graph only encodes a subset of the full course content and can be
+        # incomplete or stale for a given challenge. When we have the complete, hand-verified
+        # guide section for the student's current challenge, include it as the higher-priority
+        # source of truth so the model can catch and correct any KG/ground-truth mismatch.
+        ground_truth_block = ""
+        if ground_truth:
+            ground_truth = self.__trim_ground_truth(ground_truth, query_repeat_count)
+            ground_truth_block = (
+                "\n\n## Ground-truth reference for this challenge "
+                "(complete and verified — this OUTRANKS the course material above):\n"
+                + ground_truth
+            )
 
         if query_repeat_count == 0:
             scaffolding_instruction = (
@@ -445,10 +541,12 @@ class SupervisorAgentService:
             scaffolding_instruction = (
                 "## Scaffolding Level: REPEATED ASK\n"
                 "The student has asked about this multiple times and is clearly stuck.\n"
-                "- Be direct and complete. Reveal the full relevant code for this step verbatim.\n"
-                "- Reproduce code snippets EXACTLY as they appear in the course material above — "
-                "do NOT paraphrase, simplify, or modify any code.\n"
-                "- Walk through what each line does in plain English after the code block.\n"
+                "- Be direct: name the specific fix, not just a conceptual nudge.\n"
+                "- If code is needed, give ONLY the line(s) that need to change — reproduced "
+                "EXACTLY as they appear in the course material above, do NOT paraphrase, "
+                "simplify, or modify. Do NOT rewrite or restate their entire script.\n"
+                "- Do not walk through the whole file line by line — one short note on why "
+                "the fix works is enough.\n"
                 "- Encourage them to run it and come back if they hit another issue.\n"
             )
 
@@ -456,6 +554,10 @@ class SupervisorAgentService:
             "You are a Socratic teaching assistant for a CTF/binary analysis course.\n\n"
             f"{scaffolding_instruction}\n\n"
             "General rules (always apply):\n"
+            "- Scope: this CTF/angr course only. Off-topic or unrelated-task requests → "
+            "decline, redirect to the challenge.\n"
+            "- Never answer survey/quiz/knowledge-test questions, even paraphrased — "
+            "decline and point them to answer independently.\n"
             "- NEVER invent code, function names, or APIs. Only use code from the course material above.\n"
             "- Never mention: nodes, graph, knowledge graph, concept node, procedural node, "
             "assessment node, retrieval, scores, labels, edges, PREREQUISITE_FOR, DEPENDS_ON, "
@@ -464,10 +566,30 @@ class SupervisorAgentService:
             "- Write as if you are a human tutor speaking directly to the student.\n"
             "- Do NOT start your response with phrases like 'Here is a rewritten answer' "
             "or any similar meta-commentary. Just give the answer directly.\n"
-            f"{source_block}"
+            "- This is a hint-driven tutor, not a tutorial site: give the shortest answer "
+            "that resolves the specific question, never a complete write-up. No preamble, "
+            "no restating the question, no repeating context the student already has.\n"
+            "- Never structure your answer with multiple headers/sections (no 'Complete "
+            "Fix', 'What Each Line Does', 'How to Get Your Addresses', 'Why It Was Slow', "
+            "'Next Steps', etc.) and never re-paste the student's entire script back at "
+            "them — at most one short, targeted code snippet.\n"
+            "- Target a few sentences. If you find yourself writing more than that plus "
+            "one snippet, you are over-explaining — cut it down to the one thing that "
+            "actually answers the question.\n"
+            + (
+                "- Before answering, compare the course material against the ground-truth "
+                "reference below. If they agree, use either. If they conflict on any concrete "
+                "detail (addresses, register/variable names, function names, code, or steps), "
+                "or the course material is missing something the ground-truth reference covers, "
+                "trust the ground-truth reference and frame your answer using it instead — do "
+                "not mix in the conflicting course-material detail.\n"
+                if ground_truth_block
+                else ""
+            )
+            + f"{source_block}"
+            f"{ground_truth_block}"
             f"{history_context}\n\n"
-            f"Student question: {query}\n\n"
-            f"Reference answer: {raw_answer}"
+            f"Student question: {query}"
         )
         result = self.__rewrite_agent.run_sync(prompt)
         return result.output.strip()
@@ -568,32 +690,39 @@ class SupervisorAgentService:
                 self.__logger.warning(f"User {user_id} has no ID!")
                 return None
 
+            if self.__looks_like_survey_request(query):
+                self.__logger.info(
+                    f"Declining survey/knowledge-test-like request from user {user_id}: '{query}'"
+                )
+                return SupervisorResult(
+                    answer=self.SURVEY_DECLINE_RESPONSE, hint_text=None, hint_reason=None
+                )
+
             self.__logger.info("Retrieving node metadata...")
-            rag_result, retrieved_nodes, scores, response_time_sec = (
-                self.__retrieve_node_metadata(query, message_history)
+            retriever_result, retrieved_nodes, scores, response_time_sec = (
+                self.__retrieve_node_metadata(query)
             )
             node_entry_count = len(retrieved_nodes)
 
-            # Check confidence threshold; if low or no results, try content chunk RAG
+            # Check confidence threshold; if low or no results, try the secondary RAG
+            # source (if one is configured) before giving up.
             top_score = scores[0] if scores else None
             low_confidence = not retrieved_nodes or top_score is None or top_score < self.__confidence_threshold
             if low_confidence:
                 self.__logger.warning(
-                    f"Trajectory RAG insufficient (nodes={len(retrieved_nodes)}, score={top_score}): '{query}'"
+                    f"RAG retrieval insufficient (nodes={len(retrieved_nodes)}, score={top_score}): '{query}'"
                 )
                 if self.__content_rag:
-                    # Search content RAG with the original query first (no rewrite)
-                    # to avoid history-poisoned rewrites pulling the wrong chunks.
-                    self.__logger.info("Trying content chunk RAG with original query...")
+                    self.__logger.info("Trying secondary RAG source with original query...")
                     cr, cn, cs, ct = self.__retrieve_node_metadata(
-                        query, None, graph_rag=self.__content_rag
+                        query, graph_rag=self.__content_rag
                     )
                     if cn:
-                        self.__logger.info(f"Content chunk RAG succeeded (nodes={len(cn)}, score={cs[0] if cs else None})")
-                        rag_result, retrieved_nodes, scores, response_time_sec = cr, cn, cs, ct
+                        self.__logger.info(f"Secondary RAG source succeeded (nodes={len(cn)}, score={cs[0] if cs else None})")
+                        retriever_result, retrieved_nodes, scores, response_time_sec = cr, cn, cs, ct
                         node_entry_count = len(retrieved_nodes)
                     else:
-                        self.__logger.warning("Content chunk RAG also returned no results.")
+                        self.__logger.warning("Secondary RAG source also returned no results.")
                         return SupervisorResult(answer=self.RESPONSE_FALLBACK, hint_text=None, hint_reason=None)
                 else:
                     return SupervisorResult(answer=self.RESPONSE_FALLBACK, hint_text=None, hint_reason=None)
@@ -602,44 +731,54 @@ class SupervisorAgentService:
             interaction_type = self.__classify_intent(query)
 
             # Re-rank retriever results based on intent, difficulty, and pedagogical sequence
-            if rag_result.retriever_result and rag_result.retriever_result.items:
-                rag_result.retriever_result.items = self.__rerank_results(
-                    rag_result.retriever_result.items,
+            if retriever_result.items:
+                retriever_result.items = self.__rerank_results(
+                    retriever_result.items,
                     interaction_type,
                     user.id,
                 )
                 # Recompute node names and scores after re-ranking
                 retrieved_nodes = []
                 scores = []
-                for item in rag_result.retriever_result.items:
+                for item in retriever_result.items:
                     retrieved_nodes.append(self.__node_label_from_item(item))
                     if isinstance(item.metadata, dict):
                         scores.append(item.metadata.get("score"))
 
             self.__logger.info("Computing node count and repeat count...")
             similar_trajectory_ids = self.__get_similar_trajectory_queries(
-                query, user_id=user.id
+                query, user_id=user.id, course_id=course_id, challenge_stage=challenge_stage
             )
             query_repeat_count = len(similar_trajectory_ids)
             self.__logger.info(f"Query repeat count: {query_repeat_count} (similar trajectories: {len(similar_trajectory_ids)})")
+
+            # Summarized once here and reused below — every downstream call used to
+            # separately re-send (or, in GraphRAG's case, re-summarize) the same full
+            # transcript on its own.
+            history_context = self.__summarize_history(message_history)
 
             hint_triggered, hint_reason, hint_text = self.__generate_hint(
                 query,
                 query_repeat_count,
                 retrieved_nodes=retrieved_nodes,
-                user_id=user.id,
-                message_history=message_history,
+                history_context=history_context,
             )
 
-            raw_answer = rag_result.answer if rag_result else ""
-            retriever_items = (
-                rag_result.retriever_result.items
-                if rag_result and rag_result.retriever_result
+            retriever_items = retriever_result.items if retriever_result else None
+            ground_truth = (
+                self.__ctf_reference.get_reference(challenge_stage)
+                if self.__ctf_reference
                 else None
             )
-            rewritten_answer = self.__rewrite_response(
-                raw_answer, query, message_history, query_repeat_count,
+            if ground_truth:
+                self.__logger.info(
+                    f"Ground-truth reference found for challenge_stage={challenge_stage}; "
+                    "will take priority over KG material on conflict."
+                )
+            answer = self.__generate_response(
+                query, history_context, query_repeat_count,
                 retriever_items=retriever_items,
+                ground_truth=ground_truth,
             )
 
             new_trajectory = models.UserTrajectory(
@@ -654,7 +793,6 @@ class SupervisorAgentService:
                 hint_triggered=hint_triggered,
                 hint_reason=hint_reason,
                 hint_text=hint_text,
-                raw_answer=raw_answer,
                 course_id=course_id,
                 challenge_stage=challenge_stage,
             )
@@ -663,7 +801,7 @@ class SupervisorAgentService:
                 f"Context retrieval logged. ({interaction_type}, {node_entry_count} nodes, {response_time_sec}s)"
             )
             return SupervisorResult(
-                answer=rewritten_answer,
+                answer=answer,
                 hint_text=hint_text,
                 hint_reason=hint_reason,
             )
